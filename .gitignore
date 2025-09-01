@@ -468,6 +468,9 @@ greengrass_packages/
 scripts/local/
 utils/local/
 
+# Other
+*.out
+
 # ==============================================================================
 # EXCEPTIONS (Files to explicitly include)
 # ==============================================================================

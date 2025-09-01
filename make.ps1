@@ -3,7 +3,7 @@
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet("setup", "build", "test", "lint", "lint-fix", "typecheck", "test-infra", "all", "")]
+    [ValidateSet("setup", "build", "test", "lint", "lint-fix", "typecheck", "test-infra", "deploy", "all", "")]
     [string]$Target = "all",
     
     [switch]$VerboseOutput,
@@ -55,6 +55,7 @@ TARGETS:
     lint-fix    Run code linting and automatically fix issues
     typecheck   Run static type checking with Pyright
     test-infra  Run infrastructure tests (Terraform validation)
+    deploy      Deploy infrastructure (requires lint, typecheck, and tests to pass)
     all         Run all checks (default)
 
 OPTIONS:
@@ -67,6 +68,7 @@ EXAMPLES:
     .\make.ps1 test               # Run tests only
     .\make.ps1 lint               # Run linting only
     .\make.ps1 lint-fix           # Run linting and fix issues
+    .\make.ps1 deploy             # Deploy infrastructure (after validation)
     .\make.ps1 all -VerboseOutput # Run all with verbose output
 
 "@ -ForegroundColor White
@@ -316,6 +318,172 @@ function Invoke-TestInfra {
     }
 }
 
+function Invoke-Deploy {
+    Write-Header "Deploying infrastructure with validation"
+    
+    # First, run all validation checks
+    Write-Info "Running pre-deployment validation checks..."
+    
+    # Track validation status
+    $validationPassed = $true
+    $validationResults = @()
+    
+    # Run lint check
+    Write-Info "Step 1/4: Running code linting..."
+    try {
+        if (-not (Test-Dependencies)) {
+            Write-Error "Dependencies not installed. Run '.\make.ps1 setup' first."
+            exit 1
+        }
+        
+        $lintOutput = python -m ruff check $SrcDir $TestsDir 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $validationPassed = $false
+            $validationResults += "❌ Lint check failed"
+            Write-Error "Lint check failed. Please fix linting issues before deployment."
+            Write-Host $lintOutput -ForegroundColor Red
+        } else {
+            $validationResults += "✅ Lint check passed"
+            Write-Success "Lint check passed"
+        }
+    }
+    catch {
+        $validationPassed = $false
+        $validationResults += "❌ Lint check failed with error: $_"
+        Write-Error "Lint check failed: $_"
+    }
+    
+    # Run type check
+    Write-Info "Step 2/4: Running type checking..."
+    try {
+        $typecheckOutput = python -m pyright $SrcDir 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $validationPassed = $false
+            $validationResults += "❌ Type check failed"
+            Write-Error "Type check failed. Please fix type issues before deployment."
+            Write-Host $typecheckOutput -ForegroundColor Red
+        } else {
+            $validationResults += "✅ Type check passed"
+            Write-Success "Type check passed"
+        }
+    }
+    catch {
+        $validationPassed = $false
+        $validationResults += "❌ Type check failed with error: $_"
+        Write-Error "Type check failed: $_"
+    }
+    
+    # Run tests
+    Write-Info "Step 3/4: Running all tests..."
+    try {
+        $testOutput = python -m pytest $TestsDir --tb=short 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $validationPassed = $false
+            $validationResults += "❌ Tests failed"
+            Write-Error "Tests failed. Please fix failing tests before deployment."
+            Write-Host $testOutput -ForegroundColor Red
+        } else {
+            $validationResults += "✅ Tests passed"
+            Write-Success "Tests passed"
+        }
+    }
+    catch {
+        $validationPassed = $false
+        $validationResults += "❌ Tests failed with error: $_"
+        Write-Error "Tests failed: $_"
+    }
+    
+    # Check if all validations passed
+    if (-not $validationPassed) {
+        Write-Header "Pre-deployment validation summary"
+        foreach ($result in $validationResults) {
+            Write-Host $result
+        }
+        Write-Error "Deployment aborted due to validation failures. Please fix the issues above and try again."
+        exit 1
+    }
+    
+    # All validations passed, proceed with Terraform deployment
+    Write-Info "Step 4/4: All validations passed. Proceeding with Terraform deployment..."
+    
+    # Check if Terraform is available
+    try {
+        $terraformVersion = terraform version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Terraform not available. Please install Terraform to deploy infrastructure."
+            exit 1
+        }
+        Write-Info "Using Terraform: $($terraformVersion -split "`n" | Select-Object -First 1)"
+    }
+    catch {
+        Write-Error "Terraform not available. Please install Terraform to deploy infrastructure."
+        exit 1
+    }
+    
+    # Check if infrastructure directory exists
+    if (-not (Test-Path $InfraDir)) {
+        Write-Error "Infrastructure directory not found at $InfraDir"
+        exit 1
+    }
+    
+    # Change to infrastructure directory and deploy
+    Push-Location $InfraDir
+    try {
+        # Initialize Terraform
+        Invoke-SafeCommand "terraform init" "Initializing Terraform"
+        
+        # Create and review plan
+        Write-Info "Creating Terraform execution plan..."
+        Invoke-SafeCommand "terraform plan -out=tfplan" "Creating Terraform plan"
+        
+        # Prompt for confirmation
+        Write-Warning "About to apply Terraform changes. This will modify AWS infrastructure."
+        $confirmation = Read-Host "Do you want to proceed with the deployment? (yes/no)"
+        
+        if ($confirmation -ne "yes") {
+            Write-Info "Deployment cancelled by user."
+            if (Test-Path "tfplan") {
+                Remove-Item "tfplan" -Force
+            }
+            return
+        }
+        
+        # Apply the plan
+        Write-Info "Applying Terraform changes..."
+        Invoke-SafeCommand "terraform apply tfplan" "Applying Terraform configuration"
+        
+        # Clean up plan file
+        if (Test-Path "tfplan") {
+            Remove-Item "tfplan" -Force
+        }
+        
+        Write-Success "Infrastructure deployment completed successfully!"
+        
+        # Show outputs if any
+        Write-Info "Terraform outputs:"
+        try {
+            terraform output 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Info "Infrastructure outputs displayed above."
+            } else {
+                Write-Info "No Terraform outputs defined."
+            }
+        }
+        catch {
+            Write-Info "Could not retrieve Terraform outputs."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    
+    Write-Header "Deployment validation summary"
+    foreach ($result in $validationResults) {
+        Write-Host $result
+    }
+    Write-Success "✅ Infrastructure deployed successfully!"
+}
+
 function Invoke-All {
     Write-Header "Running all development checks"
     
@@ -387,6 +555,7 @@ try {
         "lint-fix" { Invoke-LintFix }
         "typecheck" { Invoke-TypeCheck }
         "test-infra" { Invoke-TestInfra }
+        "deploy" { Invoke-Deploy }
         { $_ -in @("all", "") } { Invoke-All }
         default {
             Write-Error "Unknown target: $Target"
