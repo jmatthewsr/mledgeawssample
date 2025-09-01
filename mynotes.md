@@ -34,4 +34,7 @@ Create an ML edge project that fine-tunes a small language model for intent clas
 - Production-level code quality standards
 
 Please create a detailed implementation plan that follows TDD principles and requires individual approval for each task before implementation. The plan should be structured in logical phases and include specific, actionable items with checkboxes for tracking progress.
+## Phase 1 Notes
+* some errors in the make.ps1 script, were identified and fixed
+* need to manually validate all make functions
 
